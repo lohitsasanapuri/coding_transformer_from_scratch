@@ -25,7 +25,7 @@ class PositionalEncoding(nn.Module):
         pe =  torch.zeros(seq_len, d_model)
         # Create a vector shape of (seq_len, 1)
         position = torch.arange(0, seq_len, dtype = torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, seq_len, 2).float() * (-math.log(10000.0) / d_model))
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
 
         # Apply the sin for even and cos for odd indices
         pe[:, 0::2]  = torch.sin(position*div_term)
@@ -38,7 +38,7 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x):
         
-        x = x + (self.pe[:, :x.size(1), :]).requires_grad(False)
+        x = x + (self.pe[:, :x.size(1), :]).requires_grad_(False)
         return self.dropout(x)
 
 class LayerNormalization(nn.Module):
@@ -47,9 +47,10 @@ class LayerNormalization(nn.Module):
         super().__init__()
         self.eps = eps
         self.alpha = nn.Parameter(torch.ones(1)) # Multiplied
-        self.bais = nn.Parameter(torch.zeros(1)) # Added
+        self.bias = nn.Parameter(torch.zeros(1)) # Added
 
     def  forward(self, x):
+        x = x.float() 
         mean = x.mean(dim = -1, keepdim = True )
         std = x.std(dim = -1 , keepdim = True)
         return self.alpha *((x -  mean) / (std + self.eps)) + self.bias
@@ -86,7 +87,7 @@ class MultiheadAttentionBlock(nn.Module):
     def attention(query, key, value, mask, dropout = nn.Dropout):
         d_k = query.size(-1)
         # (batch, h , seq_len, d_k) -> ( batch, h, seq_len, seq_len)
-        attention_scores = (query @ key.transpose(2, 1)) / math.sqrt(d_k)
+        attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
         if mask is not None :
             attention_scores.masked_fill_(mask == 0 , -1e9)
         attention_scores = attention_scores.softmax(dim = -1) # (batch, h, seq_len, d_model)
@@ -105,7 +106,7 @@ class MultiheadAttentionBlock(nn.Module):
         # (batch, seq_len, d_model) --> (batch, seq_len, h, d_k) --> (batch, h, seq_len, d_k)
         query = query .view(query.shape[0], query.shape[1],self.h, self.d_k).transpose(1,2)
         key = key.view(key.shape[0], key.shape[1], self.h, self.d_k) .transpose(1,2)
-        value = value. view(value.shape[0],value.shepe[1], self.h, self.d_k).transpose(1,2)
+        value = value. view(value.shape[0],value.shape[1], self.h, self.d_k).transpose(1,2)
 
         x, self.attention_scores = MultiheadAttentionBlock.attention(query, key, value, mask, self.dropout)
         # (batch, h, seq_len, d_k) --> (batch, seq_len, h, d_k) --> (batch, seq_len, d_model)
@@ -120,7 +121,7 @@ class ResidualConnection(nn.Module):
 
     def __init__(self, dropout:float):
         super().__init__()
-        self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
         self.norm = LayerNormalization()
 
     def forward(self, x, sublayer):
@@ -130,7 +131,7 @@ class ResidualConnection(nn.Module):
 class Encoderblock(nn.Module):
 
     def __init__(self, self_attention_block : MultiheadAttentionBlock, feed_forward_block : FeedForwardBlock, dropout: float) -> None:
-        super.__init__()
+        super().__init__()
         self.self_attention_block = self_attention_block
         self.feed_forward_block = feed_forward_block
         self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(2)])
@@ -140,10 +141,10 @@ class Encoderblock(nn.Module):
         x = self.residual_connections[1](x, self.feed_forward_block)
         return x
     
-class Encoder(nn.block):
+class Encoder(nn.Module):
     
     def __init__(self, layers: nn.ModuleList) -> None :
-        super.__init__()
+        super().__init__()
         self.layers = layers
         self.norm = LayerNormalization()
 
@@ -156,7 +157,7 @@ class Encoder(nn.block):
 class DecoderBlock(nn.Module):
 
     def __init__(self, self_attention_block: MultiheadAttentionBlock, cross_attention_block: MultiheadAttentionBlock, feed_forward_block : FeedForwardBlock, dropout:float) -> None:
-        super.__init__()
+        super().__init__()
         self.self_attention_block = self_attention_block
         self.cross_attention_block = cross_attention_block
         self.feed_forward_block = feed_forward_block
@@ -171,7 +172,7 @@ class DecoderBlock(nn.Module):
 class Decoder(nn.Module):
 
     def __init__(self, layers: nn.ModuleList) -> None :
-        super.__init__()
+        super().__init__()
         self.layers = layers
         self.norm = LayerNormalization()
     
@@ -183,7 +184,7 @@ class Decoder(nn.Module):
 class ProjectionLayer(nn.Module):
 
     def __init__(self,d_model: int, vocab_size: int)-> None:
-        super.__init__()
+        super().__init__()
         self.proj = nn.Linear(d_model,vocab_size)
     
     def forward(self,x):
@@ -193,27 +194,27 @@ class ProjectionLayer(nn.Module):
 class Transformer(nn.Module):
     
     def __init__(self, encoder : Encoder, decoder :Decoder, src_embed:InputEmbeddings, tgt_embed: InputEmbeddings,src_pos: PositionalEncoding, tgt_pos: PositionalEncoding, projection: ProjectionLayer ) -> None:
-        super.__init__()
+        super().__init__()
         self.src_embed = src_embed
         self.tgt_embed = tgt_embed
         self.src_pos = src_pos
         self.tgt_pos = tgt_pos
         self.encoder = encoder
         self.decoder = decoder
-        self.projection = projection
+        self.projection_layer = projection
 
     def encode(self, src, src_mask):
         src = self.src_embed(src)
         src = self.src_pos(src)
-        return self.enoder(src, src_mask)
+        return self.encoder(src, src_mask)
     
     def decode(self, tgt, encoder_output, src_mask, tgt_mask):
         tgt = self.tgt_embed(tgt)
-        tgt = self.tgt_post(tgt)
-        return self.decoder(tgt.encoder_output, src_mask, tgt_mask)
+        tgt = self.tgt_pos(tgt)
+        return self.decoder(tgt, encoder_output, src_mask, tgt_mask)
     
     def projection(self, x):
-        return self.projection(x)
+        return self.projection_layer(x)
     
 def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int = 512, N : int = 6, h : int = 8, dropout: float = 0.1, d_ff: int = 2048) -> Transformer:
     
