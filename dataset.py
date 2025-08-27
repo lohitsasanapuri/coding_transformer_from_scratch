@@ -61,7 +61,6 @@ class BilingualDataset(Dataset):
                 self.eos_token,
                 self.pad_token.repeat(dec_num_pad_tokens)
             ]
-
         )
 
         assert len(encoder_input) == self.seq_len

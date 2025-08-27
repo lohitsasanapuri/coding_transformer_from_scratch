@@ -20,6 +20,68 @@ from torch.utils.tensorboard import SummaryWriter
 
 from tqdm import tqdm
 
+def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
+    sos_idx = tokenizer_tgt.token_to_id("[SOS]")
+    eos_idx = tokenizer_tgt.token_to_id("[EOS]")
+
+    encoder_output = model.encode(source.long(), source_mask)
+    decoder_input = torch.full((1, 1), sos_idx, dtype=torch.long, device=device)
+
+    while decoder_input.size(1) < max_len:
+        decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
+        # order: (tgt, encoder_output, src_mask, tgt_mask)
+        decoder_output = model.decode(decoder_input, encoder_output, source_mask, decoder_mask)
+        logits_last = model.projection(decoder_output[:, -1])
+        _, next_word = torch.max(logits_last, dim=1)
+
+        next_token = next_word.item()
+        decoder_input = torch.cat(
+            [decoder_input, torch.tensor([[next_token]], dtype=torch.long, device=device)],
+            dim=1
+        )
+        if next_token == eos_idx:
+            break
+
+    return decoder_input.squeeze(0)
+
+
+
+def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, device,
+                   print_msg, globel_state, writer, num_examples=2):
+    model.eval()
+    count = 0
+    console_width = 80
+
+    with torch.no_grad():
+        for batch in validation_ds:
+            count += 1
+            encoder_input = batch['encoder_input'].to(device).long()
+            encoder_mask  = batch['encoder_mask'].to(device)
+
+            # decode prediction
+            model_output_ids = greedy_decode(
+                model, encoder_input, encoder_mask,
+                tokenizer_src, tokenizer_tgt, validation_ds.dataset.seq_len, device
+            )
+
+            # ✅ use keys that your Dataset actually returns
+            source_text = batch['src_text'][0]  # NOT 'lang_src'
+            target_text = batch['tgt_text'][0]  # NOT 'lang_tgt'
+
+            # pretty print
+            model_out_text = tokenizer_tgt.decode(model_output_ids.detach().cpu().tolist())
+
+            print_msg('-' * console_width)
+            print_msg(f"Source:    {source_text}")
+            print_msg(f"Target:    {target_text}")
+            print_msg(f"Predicted: {model_out_text}")
+
+            if count >= num_examples:
+                break
+
+
+
+
 def get_all_sentences(ds, lang):
     for item in ds :
         yield item['translation'][lang]
@@ -38,7 +100,11 @@ def get_or_build_tokenizer(config, ds, lang):
     return tokenizer
 
 def get_ds(config):
+
     ds_raw = load_dataset('opus_books', f'{config["lang_src"]}-{config["lang_tgt"]}', split='train')
+    
+    # for quick testing use a smaller dataset
+    ds_raw = ds_raw.select(range(160))
 
     # build tokenizers
     tokenizer_src = get_or_build_tokenizer(config, ds_raw, config['lang_src'])
@@ -108,9 +174,10 @@ def train_model(config):
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id("[PAD]"), label_smoothing=0.1).to(device)
 
     for epoch in range(initial_epoch, config['num_epochs']):
-        model.train()
+        #model.train()
         batch_iterator = tqdm(train_dataloader, desc=f' Processing epoch {epoch+1}/{config["num_epochs"]}' )
         for batch in batch_iterator:
+            model.train()
             encoder_input = batch['encoder_input'].to(device) # (batch_size, seq_len)
             decoder_input = batch['decoder_input'].to(device) # (batch_size, seq_len)
             encoder_mask = batch['encoder_mask'].to(device) # (batch_size, 1, 1, seq_len)
@@ -136,8 +203,16 @@ def train_model(config):
             # backprop and update the weights
             loss.backward()
             optimizer.step()
-            optimizer.zero_grad()   
+            optimizer.zero_grad()
+
             global_step += 1
+        
+        run_validation(
+                model, val_dataloader, tokenizer_src, tokenizer_tgt, device,
+                lambda msg: batch_iterator.write(msg),   # print_msg
+                device,                                  # globel_state (if you need it)
+                writer,
+                num_examples=2)
         # save the model weights
         model_filename = get_weights_file_path(config, f'{epoch+1:03d}')
         torch.save({
